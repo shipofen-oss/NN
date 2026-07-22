@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+client.py
+watchdog.py
+.agent/
